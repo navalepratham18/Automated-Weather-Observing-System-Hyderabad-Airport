@@ -1,0 +1,41 @@
+paths:
+  raw_data: "data/01_raw"
+  interim_data: "data/02_interim"
+  processed_data: "data/03_processed"
+  master_data: "data/04_master"  
+
+ingestion:
+  delimiter: "\t"
+  skip_rows: 1
+
+schema_mapping:
+  # General
+  "CREATEDATE": "Datetime"
+  
+  # PTU Family
+  "QNH AERODROME (HPA)": "Pressure_QNH"
+  "TEMP (°C)": "Temperature"
+  "RH (%)": "Humidity"
+  "DEWPOINT (°C)": "DewPoint"
+  
+  # WIND Family
+  "WD10A": "Wind_Dir"
+  "WS10A (KT)": "Wind_Speed"
+  "GUST_SPEED (KT)": "Wind_Gust"
+  
+  # VIS Family
+  "MOR_10A": "Visibility_MOR"
+  "RVR_10A": "RVR"
+  
+  # PW (Rain) Family
+  "WXNWS": "Present_Weather_Code"
+  "RAIN INTENSITY (MM/H)": "Rain_Intensity"
+  "RAIN SUM (MM)": "Rain_Sum"
+  
+  # CLOUD Family (Excluding 100% missing OCTA4 and Vertical_Visibility)
+  "BASE1 (FT)": "Cloud_Base_1"
+  "BASE2 (FT)": "Cloud_Base_2"
+  "BASE3 (FT)": "Cloud_Base_3"
+  "OCTA1": "OCTA1"
+  "OCTA2": "OCTA2"
+  "OCTA3": "OCTA3"
