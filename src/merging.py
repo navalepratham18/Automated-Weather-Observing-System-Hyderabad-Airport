@@ -1,105 +1,61 @@
-# src/merging.py
+import os
+import glob
 import pandas as pd
-from pathlib import Path
-import logging
+import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+def normalize_missing_tokens(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Strips whitespace from string columns and maps empty or invalid missing tokens
+    to genuine np.nan values to ensure accurate observation flags.
+    """
+    for col in df.columns:
+        if df[col].dtype == object or isinstance(df[col].dtype, pd.StringDtype):
+            # Strip whitespace
+            df[col] = df[col].astype(str).str.strip()
+            # Replace invalid/missing representations with np.nan
+            invalid_tokens = ["", " ", "[' ']", "NA", "na", "null", "NULL", "None", "nan", "NaN"]
+            df[col] = df[col].replace(invalid_tokens, np.nan)
+    return df
 
-AGGREGATION_RULES = {
-    'Pressure_QNH': 'mean',
-    'Temperature': 'mean',
-    'Humidity': 'mean',
-    'DewPoint': 'mean',
-    'Visibility_MOR': 'mean',
-    'RVR': 'mean',
-    'Wind_Speed': 'mean',
-    'Cloud_Base_1': 'mean',
-    'Cloud_Base_2': 'mean',
-    'Cloud_Base_3': 'mean',
-    'Wind_Gust': 'max',
-    'Rain_Intensity': 'max', 
-    'Rain_Sum': 'max',
-    'Present_Weather_Code': 'last',
-    'OCTA1': 'last',
-    'OCTA2': 'last',
-    'OCTA3': 'last',
-    'Wind_Dir': 'last' 
-}
-
-def extract_date_from_path(file_path: Path) -> str:
-    """Extracts the exact YYYY-MM-DD from the folder structure and filename."""
-    try:
-        # Example: data/02_interim/2025/Oct/PTU_RWY09L_01.csv
-        month_str = file_path.parent.name
-        year_str = file_path.parent.parent.name
-        day_str = file_path.stem.split('_')[-1]
-        
-        # Map 3-letter month names to standard numeric strings
-        month_map = {
-            "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04", 
-            "May": "05", "Jun": "06", "Jul": "07", "Aug": "08", 
-            "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12"
-        }
-        
-        # If it's already a number like '10', it falls back to that. Otherwise uses the map.
-        month_num = month_map.get(month_str, month_str)
-        
-        if len(year_str) == 4 and len(day_str) == 2:
-            return f"{year_str}-{month_num}-{day_str}"
-        return ""
-    except Exception:
-        return ""
-
-def align_and_merge_daily_files(daily_files: list[Path], output_dir: Path, date_str: str):
-    if not daily_files:
-        return
-
-    dataframes = []
+def merge_interim_files(interim_dir: str = "data/03_processed", output_path: str = "data/04_master/MASTER_DATASET.csv") -> pd.DataFrame:
+    """
+    Merges all processed interim CSV files, normalizes missing tokens, generates 
+    unambiguous observation flags (is_observed_*), and saves the authentic master reference.
+    """
+    print(f"INFO: Scanning for interim CSV files in '{interim_dir}'...")
+    csv_files = glob.glob(os.path.join(interim_dir, "*.csv"))
     
-    for file in daily_files:
-        try:
-            df = pd.read_csv(file)
-            if 'Datetime' not in df.columns or df.empty:
-                continue
-                
-            df['Datetime'] = pd.to_datetime(df['Datetime'], errors='coerce')
-            df = df.dropna(subset=['Datetime'])
-            if df.empty:
-                continue
-            
-            # Fix: Strip hidden spaces and bad characters before numeric conversion
-            for col in df.columns:
-                if col in AGGREGATION_RULES and AGGREGATION_RULES[col] in ['mean', 'max']:
-                    # Clean out everything except numbers, decimals, and negative signs
-                    df[col] = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            df['Datetime'] = df['Datetime'].dt.floor('min')
-            
-            agg_dict = {col: AGGREGATION_RULES[col] for col in df.columns if col in AGGREGATION_RULES}
-            if not agg_dict: 
-                agg_dict = {col: 'last' for col in df.columns if col != 'Datetime'}
-                
-            df = df.groupby('Datetime').agg(agg_dict).reset_index()
-            df.set_index('Datetime', inplace=True)
-            dataframes.append(df)
-            
-        except Exception as e:
-            logging.warning(f"Skipping {file.name}: {e}")
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in directory: {interim_dir}")
 
-    if not dataframes:
-        return
+    df_list = []
+    for file in csv_files:
+        temp_df = pd.read_csv(file, low_memory=False)
+        df_list.append(temp_df)
 
-    # Safely merge without column duplication
-    merged_df = pd.concat(dataframes, axis=1, join='outer')
-    merged_df = merged_df.loc[:, ~merged_df.columns.duplicated()].reset_index()
-    merged_df = merged_df.sort_values('Datetime')
+    merged_df = pd.concat(df_list, ignore_index=True)
+
+    # Convert timestamp and sort chronologically
+    if 'timestamp' in merged_df.columns:
+        merged_df['timestamp'] = pd.to_datetime(merged_df['timestamp'])
+        merged_df = merged_df.sort_values('timestamp').reset_index(drop=True)
+
+    print("INFO: Normalizing missing tokens and whitespace across all columns...")
+    merged_df = normalize_missing_tokens(merged_df)
+
+    # Define key weather fields to create provenance observation masks
+    value_cols = [col for col in merged_df.columns if not col.startswith('is_observed_') and col != 'timestamp']
+
+    print("INFO: Generating precise is_observed_* provenance masks...")
+    for col in value_cols:
+        merged_df[f'is_observed_{col}'] = merged_df[col].notna().astype(int)
+
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    merged_df.to_csv(output_path, index=False)
+    print(f"INFO: Authentic master dataset saved to '{output_path}' with shape {merged_df.shape}.")
     
-    for col in merged_df.columns:
-        if col != 'Datetime' and not col.startswith('is_observed_'):
-            merged_df[f'is_observed_{col}'] = merged_df[col].notna().astype(int)
+    return merged_df
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"MERGED_{date_str}.csv"
-    merged_df.to_csv(output_file, index=False)
-    logging.info(f"Created physics-aware daily master: {output_file.name} ({len(merged_df)} rows)")
+if __name__ == "__main__":
+    merge_interim_files()

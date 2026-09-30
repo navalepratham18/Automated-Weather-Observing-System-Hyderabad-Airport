@@ -1,5 +1,15 @@
-# .gitignore
-data/
+# Environments & Caches
+.venv/
 __pycache__/
 *.pyc
-.env
+
+debug.py
+
+# Model Checkpoints
+*.pth
+
+# Large Data
+data/
+
+# Models
+models/
