@@ -1,5 +1,6 @@
 # Environments & Caches
 .venv/
+.venv-1/
 __pycache__/
 *.pyc
 
@@ -8,8 +9,9 @@ debug.py
 # Model Checkpoints
 *.pth
 
-# Large Data
-data/
+# Large Data (Ignore all folders and CSVs under data/, but keep Markdown files)
+data/*
+!data/**/*.md
 
 # Models
 models/

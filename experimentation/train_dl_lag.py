@@ -8,8 +8,8 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 
 # --- 1. CONFIGURATION & HYPERPARAMETERS ---
-DATA_PATH = "data/04_master/MASTER_DATASET_CLEANED.csv"  # Adjust if your path differs
-TARGET_COL = "Cloud_Base_1"                      # Target column to predict
+DATA_PATH = "data/04_master/MASTER_DATASET_CLEANED.csv"
+TARGET_COL = "Cloud_Base_1"
 LOOKBACK = 120                                   # 120-minute lookback window
 HORIZON = 120                                    # 120-minute forecast horizon
 BATCH_SIZE = 256
@@ -29,7 +29,7 @@ class WeatherDataset(Dataset):
         return len(self.X) - self.lookback - self.horizon + 1
 
     def __getitem__(self, idx):
-        x_window = self.X[idx : idx + self.lookbatch] if hasattr(self, 'lookbatch') else self.X[idx : idx + self.lookback]
+        x_window = self.X[idx : idx + self.lookback]
         target_val = self.y[idx + self.lookback + self.horizon - 1]
         return x_window, target_val
 
@@ -53,26 +53,24 @@ class WeatherLSTM(nn.Module):
         return out  # Shape: [batch_size, 1]
 
 def main():
-    print("INFO: Loading dataset...")
+    print("INFO: Loading dataset and engineering explicit lag features...")
     if not os.path.exists(DATA_PATH):
         raise FileNotFoundError(f"Dataset not found at {DATA_PATH}. Check your file path.")
     
     df = pd.read_csv(DATA_PATH)
     
-    # --- FEATURE CLEANING & DATETIME HANDLING ---
-    # 1. Extract cyclic time features if timestamp exists, then DROP the raw datetime column
+    # Cyclic time features
     if 'timestamp' in df.columns:
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df['hour_sin'] = np.sin(2 * np.pi * df['timestamp'].dt.hour / 24.0)
         df['hour_cos'] = np.cos(2 * np.pi * df['timestamp'].dt.hour / 24.0)
         df = df.drop(columns=['timestamp'])
     
-    # Also drop common non-predictive or leaky ID/string columns if they exist
+    # Drop unnecessary metadata columns
     cols_to_drop = [col for col in ['id', 'station_id', 'Unnamed: 0'] if col in df.columns]
     if cols_to_drop:
         df = df.drop(columns=cols_to_drop)
 
-    # Coerce everything else to strict numeric types and handle missing values
     df = df.select_dtypes(include=[np.number]).ffill().bfill().fillna(0)
     
     if TARGET_COL not in df.columns:
@@ -81,15 +79,27 @@ def main():
     else:
         target_col = TARGET_COL
 
-    # Clip extreme clear-sky artificial fill values (e.g., 25,000 ft caps)
-    if target_col in df.columns:
-        upper_cap = df[target_col].quantile(0.98)
-        df[target_col] = df[target_col].clip(upper=upper_cap)
+    # --- ADVANCED FEATURE ENGINEERING: EXPLICIT LAGS & MOMENTUM ---
+    print("INFO: Adding explicit multi-step lag and velocity features...")
+    df['target_lag_1'] = df[target_col].shift(1)
+    df['target_lag_5'] = df[target_col].shift(5)
+    df['target_lag_15'] = df[target_col].shift(15)
+    df['target_lag_30'] = df[target_col].shift(30)
+    
+    df['target_momentum_5'] = df[target_col] - df['target_lag_5']
+    df['target_momentum_30'] = df[target_col] - df['target_lag_30']
+
+    # Clean up NaN values introduced by shifting
+    df = df.ffill().bfill().fillna(0)
+
+    # Clip extreme clear-sky artificial fill values
+    upper_cap = df[target_col].quantile(0.98)
+    df[target_col] = df[target_col].clip(upper=upper_cap)
 
     features = df.drop(columns=[target_col]).values
     raw_targets = df[[target_col]].values
 
-    print(f"INFO: Cleaned features shape: {features.shape}. Training without raw timestamps or unnecessary columns.")
+    print(f"INFO: Enhanced feature shape with lags: {features.shape}")
 
     print("INFO: Scaling features and targets...")
     feature_scaler = StandardScaler()
@@ -125,9 +135,11 @@ def main():
     best_val_loss = float('inf')
     patience = 10
     patience_counter = 0
-    best_model_path = "best_weather_lstm_clean.pth"
+    
+    os.makedirs("models", exist_ok=True)
+    best_model_path = "models/v7_lag_lstm.pth"
 
-    print(f"INFO: Starting Training on {DEVICE} (Max Epochs: {EPOCHS})...")
+    print(f"INFO: Starting Lag-Feature Training on {DEVICE} (Max Epochs: {EPOCHS})...")
     for epoch in range(EPOCHS):
         model.train()
         train_loss = 0.0
@@ -146,7 +158,6 @@ def main():
 
         train_loss /= len(train_loader.dataset)
 
-        # Validation loop
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -165,14 +176,14 @@ def main():
             best_val_loss = val_loss
             patience_counter = 0
             torch.save(model.state_dict(), best_model_path)
-            print(f"  -> New best model saved! (Val Loss: {val_loss:.4f})")
+            print(f"  -> New best v7 model saved! (Val Loss: {val_loss:.4f})")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print("WARNING: Early stopping triggered. No improvement for 10 epochs.")
                 break
 
-    print("INFO: Evaluating Predictions on Test Set...")
+    print("INFO: Evaluating Version 7 Predictions on Test Set...")
     model.load_state_dict(torch.load(best_model_path, weights_only=True))
     model.eval()
 
@@ -188,7 +199,6 @@ def main():
     preds_scaled = np.vstack(preds_list)
     trues_scaled = np.vstack(trues_list)
 
-    # Inverse transform back to original units (feet)
     preds_orig = target_scaler.inverse_transform(preds_scaled.reshape(-1, 1))
     trues_orig = target_scaler.inverse_transform(trues_scaled.reshape(-1, 1))
 
@@ -196,13 +206,12 @@ def main():
     rmse = np.sqrt(mse)
     mae = np.mean(np.abs(preds_orig - trues_orig))
 
-    # Compute Persistence Baseline on the test split
     persistence_preds = trues_orig[:-HORIZON]
     persistence_actuals = trues_orig[HORIZON:]
     baseline_rmse = np.sqrt(np.mean((persistence_preds - persistence_actuals) ** 2))
 
     print("\n" + "="*50)
-    print("  LSTM + CLEANED FEATURES RESULTS")
+    print("  VERSION 7: LSTM + EXPLICIT LAG FEATURES RESULTS")
     print("="*50)
     print(f"Test RMSE: {rmse:.4f} ft")
     print(f"Test MAE:  {mae:.4f} ft")
